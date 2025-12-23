@@ -1304,6 +1304,7 @@ dependencies = [
  "dlog",
  "dotenv",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "twitch-irc",
