@@ -5,14 +5,19 @@ use twitch_irc::{
     TwitchIRCClient,
     message::ServerMessage,
 };
-use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::sync::broadcast;
+use std::{
+    fs, 
+    env, 
+    io::{self as stdio, Write},
+    sync::Arc,
+};
+use tokio::{
+    sync::broadcast,
+    io::{self, AsyncBufReadExt, BufReader},
+};
 use async_trait::async_trait;
-use std::{fs, env};
-use std::io::{self as stdio, Write};
 use dotenv::dotenv;
 use dlog::{*, enums::OutputTarget};
-// Initiate logger with 'let mut log = Logger::init('app_name', None, OutputTarget::(Terminal/LogFile)).unwrap();'
 
 #[derive(Debug)]
 struct FileTokenStorage {
@@ -53,13 +58,15 @@ pub async fn main() {
 
     let credentials = RefreshingLoginCredentials::init(client_id, client_secret, storage);
     let config = ClientConfig::new_simple(credentials);
-    let (mut incoming_messages, client) =
-        TwitchIRCClient::<SecureTCPTransport, RefreshingLoginCredentials<FileTokenStorage>>::new(config);
+    let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, RefreshingLoginCredentials<FileTokenStorage>>::new(config);
+    let client = Arc::new(client);
+    let twitch_channel = Arc::new(twitch_channel);
 
 
-    // Create a shutdown signal channel
     let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
 
+    let client_for_chat = client.clone();
+    let channel_for_chat = twitch_channel.clone();
     let join_handle = tokio::spawn({
         let mut shutdown_rx = shutdown_tx.subscribe();
         async move {
@@ -69,7 +76,13 @@ pub async fn main() {
                         match maybe_msg {
                             Some(message) => match message {
                                 ServerMessage::Privmsg(msg) => {
+                                    if msg.message_text == "!hello" {
+                                        let _ = client_for_chat.say(channel_for_chat.to_string(), format!("Hello {}", msg.sender.name)).await;
+                                    }
+                                    print!("\r\x1b[2k");
                                     log.info(format!("[{}]: {}", msg.sender.name, msg.message_text));
+                                    print!("> ");
+                                    stdio::stdout().flush().unwrap();
                                 },
                                 ServerMessage::Whisper(msg) => {
                                     log.info(format!("(w) {}: {}", msg.sender.name, msg.message_text));
@@ -80,7 +93,6 @@ pub async fn main() {
                         }
                     }
                     _ = shutdown_rx.recv() => {
-                        // Received shutdown signal
                         break;
                     }
                 }
@@ -88,12 +100,12 @@ pub async fn main() {
         }
     });
 
-    client.join(twitch_channel.clone()).unwrap();
+    client.join(twitch_channel.to_string()).unwrap();
     
 
-    let client_clone = client.clone();
+    let client_for_stdin = client.clone();
     let shutdown_tx2 = shutdown_tx.clone();
-    let twitch_channel2 = twitch_channel.clone();
+    let channel_for_stdin = twitch_channel.clone();
     tokio::spawn(async move {
         let stdin = io::stdin();
         let mut reader = BufReader::new(stdin).lines();
@@ -104,11 +116,11 @@ pub async fn main() {
             match reader.next_line().await {
                 Ok(Some(line)) if !line.trim().is_empty() => {
                     if line.trim() == "!quit" {
-                        let _ = client_clone.part(twitch_channel2.clone());
-                        let _ = shutdown_tx2.send(()); // Signal shutdown
+                        let _ = client_for_stdin.part(channel_for_stdin.to_string());
+                        let _ = shutdown_tx2.send(());
                         break;
                     } else {
-                        let _ = client_clone.say(twitch_channel2.clone(), line).await;
+                        let _ = client_for_stdin.say(channel_for_stdin.to_string(), line).await;
                     }
                 }
                 Ok(Some(_)) => continue,
